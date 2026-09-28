@@ -23,6 +23,7 @@ from typing import Any
 METEORA_API_DEFAULT = "https://dlmm.datapi.meteora.ag"
 SOLANA_ADDRESS_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 MAX_TELEGRAM_MESSAGE = 4096
+ALERTS_FILE = "alerts.json"
 
 
 class ApiError(RuntimeError):
@@ -338,11 +339,25 @@ class TelegramBotApi:
             raise ApiError(f"Telegram API error: {result}")
         return result.get("result")
 
-    def send(self, chat_id: int | str, text: str, parse_mode: str | None = None) -> None:
+    def send(
+        self,
+        chat_id: int | str,
+        text: str,
+        parse_mode: str | None = None,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> None:
         payload: dict[str, Any] = {"chat_id": chat_id, "text": text}
         if parse_mode:
             payload["parse_mode"] = parse_mode
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
         self.call("sendMessage", payload)
+
+    def answer_callback(self, callback_id: str, text: str | None = None) -> None:
+        payload: dict[str, Any] = {"callback_query_id": callback_id}
+        if text:
+            payload["text"] = text
+        self.call("answerCallbackQuery", payload)
 
 
 def valid_mint(value: str) -> bool:
@@ -354,6 +369,163 @@ def command_argument(text: str) -> str:
     if value.lower().startswith("/apr"):
         value = value[4:].strip().split()[0] if value[4:].strip() else ""
     return value
+
+
+def load_alerts(path: str = ALERTS_FILE) -> list[dict[str, Any]]:
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data if isinstance(data, list) else []
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
+def save_alerts(alerts: list[dict[str, Any]], path: str = ALERTS_FILE) -> None:
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(alerts, handle, indent=2, ensure_ascii=False)
+
+
+def alert_keyboard(mint: str) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [{"text": "🔔 Set Alert", "callback_data": f"alertmenu:{mint}"}],
+            [{"text": "📋 Alert Aktif", "callback_data": "alertlist"}],
+        ]
+    }
+
+
+def pool_choice_keyboard(pools: list[PoolResult]) -> dict[str, Any]:
+    rows = [
+        [{"text": f"🔔 {pool.name} | TVL {money(pool.raw.get('tvl'))}", "callback_data": f"alertpool:{pool.address}"}]
+        for pool in pools
+    ]
+    rows.append([{"text": "✖️ Batal", "callback_data": "cancelalert"}])
+    return {"inline_keyboard": rows}
+
+
+def interval_keyboard(pool_address: str) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "5 menit", "callback_data": f"interval:{pool_address}:5"},
+                {"text": "15 menit (default)", "callback_data": f"interval:{pool_address}:15"},
+            ],
+            [
+                {"text": "30 menit", "callback_data": f"interval:{pool_address}:30"},
+                {"text": "60 menit", "callback_data": f"interval:{pool_address}:60"},
+            ],
+            [{"text": "✏️ Custom menit", "callback_data": f"custom:{pool_address}"}],
+            [{"text": "✖️ Batal", "callback_data": "cancelalert"}],
+        ]
+    }
+
+
+def alert_control_keyboard(pool_address: str) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [[{"text": "🔕 Matikan alert", "callback_data": f"stop:{pool_address}"}]]
+    }
+
+
+def alert_key(chat_id: int | str, pool_address: str) -> str:
+    return f"{chat_id}:{pool_address}"
+
+
+def upsert_alert(
+    alerts: list[dict[str, Any]],
+    *,
+    chat_id: int | str,
+    user_id: int,
+    mint: str,
+    pool: PoolResult,
+    interval_minutes: int,
+) -> dict[str, Any]:
+    now = time.time()
+    record = {
+        "id": alert_key(chat_id, pool.address),
+        "chat_id": chat_id,
+        "user_id": user_id,
+        "mint": mint,
+        "pool_address": pool.address,
+        "pool_name": pool.name,
+        "interval_minutes": interval_minutes,
+        "next_run": now + interval_minutes * 60,
+        "active": True,
+    }
+    for index, existing in enumerate(alerts):
+        if existing.get("id") == record["id"]:
+            alerts[index] = record
+            return record
+    alerts.append(record)
+    return record
+
+
+def active_alerts_for_chat(alerts: list[dict[str, Any]], chat_id: int | str) -> list[dict[str, Any]]:
+    return [
+        alert
+        for alert in alerts
+        if str(alert.get("chat_id")) == str(chat_id) and alert.get("active", True)
+    ]
+
+
+def prepare_display_pools(
+    mint: str,
+    pools: list[PoolResult],
+    meteora: MeteoraClient,
+    max_items: int,
+    min_pool_tvl: float,
+) -> tuple[list[PoolResult], int]:
+    display_pools, filtered_count = select_pools_for_display(pools, min_pool_tvl)
+    display_pools = display_pools[:max_items]
+    meteora.enrich_with_15m_volume(display_pools)
+    return display_pools, filtered_count
+
+
+def send_due_alerts(
+    api: TelegramBotApi,
+    meteora: MeteoraClient,
+    alerts: list[dict[str, Any]],
+    max_items: int,
+    min_pool_tvl: float,
+) -> None:
+    now = time.time()
+    changed = False
+    for alert in alerts:
+        if not alert.get("active", True) or number(alert.get("next_run")) > now:
+            continue
+
+        interval = max(1, int(alert.get("interval_minutes", 15)))
+        try:
+            pool = meteora.get_pool(str(alert["pool_address"]))
+            meteora.enrich_with_15m_volume([pool])
+            alert_text = (
+                f"<b>🔔 ALERT AKTIF — setiap {interval} menit</b>\n\n"
+                + render_pools(
+                    str(alert.get("mint") or pool.token_x.get("address", "")),
+                    [pool],
+                    False,
+                    max_items=1,
+                    min_tvl=min_pool_tvl,
+                    filtered_count=0,
+                )
+            )
+            api.send(
+                alert["chat_id"],
+                alert_text,
+                parse_mode="HTML",
+                reply_markup=alert_control_keyboard(str(alert["pool_address"])),
+            )
+            alert["next_run"] = now + interval * 60
+            changed = True
+        except (ApiError, KeyError, ValueError, TypeError) as exc:
+            print(f"[ALERT] Gagal update {alert.get('pool_address')}: {exc}")
+            # Coba lagi satu menit kemudian tanpa mengirim spam ke Telegram.
+            alert["next_run"] = now + 60
+            changed = True
+
+    if changed:
+        save_alerts(alerts)
 
 
 def print_credit() -> None:
@@ -380,19 +552,214 @@ def main() -> None:
     meteora = MeteoraClient(os.getenv("METEORA_API_URL", METEORA_API_DEFAULT))
     last_update_id = 0
     last_request_by_user: dict[int, float] = {}
+    alerts = load_alerts()
+    pool_catalog: dict[str, dict[str, Any]] = {}
+    pending_custom_interval: dict[tuple[int, int], str] = {}
+
+    def query_token(mint: str) -> tuple[list[PoolResult], bool, int]:
+        try:
+            pools = [meteora.get_pool(mint)]
+            partial = False
+        except ApiError:
+            pools, partial = meteora.find_pools_for_mint(mint)
+
+        display_pools, filtered_count = prepare_display_pools(
+            mint, pools, meteora, max_items, min_pool_tvl
+        )
+        for pool in display_pools:
+            pool_catalog[pool.address] = {"mint": mint, "pool": pool}
+        return display_pools, partial, filtered_count
+
+    def pool_choices_for_mint(mint: str) -> list[PoolResult]:
+        choices = [
+            entry["pool"]
+            for entry in pool_catalog.values()
+            if entry.get("mint") == mint and isinstance(entry.get("pool"), PoolResult)
+        ]
+        if choices:
+            return choices[:max_items]
+        try:
+            choices, _, _ = query_token(mint)
+            return choices
+        except (ApiError, ValueError, TypeError):
+            return []
+
+    def enable_alert(chat_id: int, user_id: int, pool_address: str, minutes: int) -> None:
+        entry = pool_catalog.get(pool_address)
+        try:
+            if entry:
+                mint = str(entry["mint"])
+                pool = entry["pool"]
+            else:
+                pool = meteora.get_pool(pool_address)
+                mint = str(pool.token_x.get("address", ""))
+                pool_catalog[pool_address] = {"mint": mint, "pool": pool}
+
+            record = upsert_alert(
+                alerts,
+                chat_id=chat_id,
+                user_id=user_id,
+                mint=mint,
+                pool=pool,
+                interval_minutes=minutes,
+            )
+            save_alerts(alerts)
+            api.send(
+                chat_id,
+                (
+                    f"<b>✅ Alert aktif</b>\n\n"
+                    f"Pool: <b>{html_escape(str(record['pool_name']))}</b>\n"
+                    f"Interval: <b>{minutes} menit</b>\n\n"
+                    "Bot akan mengirim APR dan volume terbaru secara berkala."
+                ),
+                parse_mode="HTML",
+                reply_markup=alert_control_keyboard(pool_address),
+            )
+        except (ApiError, KeyError, ValueError, TypeError) as exc:
+            api.send(chat_id, f"Gagal mengaktifkan alert: {exc}")
+
+    def send_alert_list(chat_id: int) -> None:
+        current = active_alerts_for_chat(alerts, chat_id)
+        if not current:
+            api.send(chat_id, "Belum ada alert aktif.")
+            return
+
+        lines = ["<b>📋 ALERT AKTIF</b>", ""]
+        rows = []
+        for index, alert in enumerate(current, 1):
+            name = html_escape(str(alert.get("pool_name", "Pool")))
+            minutes = int(alert.get("interval_minutes", 15))
+            lines.append(f"{index}. <b>{name}</b> — setiap {minutes} menit")
+            rows.append([
+                {
+                    "text": f"🔕 Matikan {index}",
+                    "callback_data": f"stop:{alert.get('pool_address', '')}",
+                }
+            ])
+        api.send(chat_id, "\n".join(lines), parse_mode="HTML", reply_markup={"inline_keyboard": rows})
+
+    def handle_callback(callback: dict[str, Any]) -> None:
+        callback_id = str(callback.get("id", ""))
+        callback_message = callback.get("message") or {}
+        callback_chat = callback_message.get("chat") or {}
+        chat_id = callback_chat.get("id")
+        sender = callback.get("from") or {}
+        user_id = int(sender.get("id", chat_id or 0))
+        data = str(callback.get("data") or "")
+        if callback_id:
+            try:
+                api.answer_callback(callback_id)
+            except ApiError:
+                pass
+        if chat_id is None:
+            return
+
+        if data == "cancelalert":
+            pending_custom_interval.pop((int(chat_id), user_id), None)
+            api.send(chat_id, "Pengaturan alert dibatalkan.")
+            return
+
+        if data == "alertlist":
+            send_alert_list(chat_id)
+            return
+
+        if data.startswith("alertmenu:"):
+            mint = data.split(":", 1)[1]
+            choices = pool_choices_for_mint(mint)
+            if not choices:
+                api.send(chat_id, "Pool tidak ditemukan atau data pool sudah tidak tersedia.")
+                return
+            api.send(
+                chat_id,
+                "<b>🔔 Pilih pool yang ingin dimonitor:</b>",
+                parse_mode="HTML",
+                reply_markup=pool_choice_keyboard(choices),
+            )
+            return
+
+        if data.startswith("alertpool:"):
+            pool_address = data.split(":", 1)[1]
+            if pool_address not in pool_catalog:
+                try:
+                    pool = meteora.get_pool(pool_address)
+                    pool_catalog[pool_address] = {
+                        "mint": str(pool.token_x.get("address", "")),
+                        "pool": pool,
+                    }
+                except ApiError:
+                    api.send(chat_id, "Pool sudah tidak ditemukan di Meteora.")
+                    return
+            pool = pool_catalog[pool_address]["pool"]
+            api.send(
+                chat_id,
+                f"Pilih interval alert untuk <b>{html_escape(pool.name)}</b>:",
+                parse_mode="HTML",
+                reply_markup=interval_keyboard(pool_address),
+            )
+            return
+
+        if data.startswith("interval:"):
+            parts = data.split(":")
+            if len(parts) == 3:
+                try:
+                    enable_alert(chat_id, user_id, parts[1], max(1, min(int(parts[2]), 1440)))
+                except ValueError:
+                    api.send(chat_id, "Interval alert tidak valid.")
+            return
+
+        if data.startswith("custom:"):
+            pool_address = data.split(":", 1)[1]
+            pending_custom_interval[(int(chat_id), user_id)] = pool_address
+            api.send(chat_id, "Kirim angka interval dalam menit (1–1440). Contoh: 20")
+            return
+
+        if data.startswith("stop:"):
+            pool_address = data.split(":", 1)[1]
+            before = len(alerts)
+            alerts[:] = [
+                alert
+                for alert in alerts
+                if not (
+                    str(alert.get("chat_id")) == str(chat_id)
+                    and str(alert.get("pool_address")) == pool_address
+                )
+            ]
+            if len(alerts) != before:
+                save_alerts(alerts)
+                api.send(chat_id, "🔕 Alert dimatikan.")
+            else:
+                api.send(chat_id, "Alert tersebut sudah tidak aktif.")
 
     print("Meteora APR Telegram Bot aktif — mode read-only")
     print_credit()
 
     while True:
         try:
+            send_due_alerts(api, meteora, alerts, max_items, min_pool_tvl)
             updates = api.call(
                 "getUpdates",
-                {"offset": last_update_id + 1, "timeout": 30, "allowed_updates": ["message"]},
+                {
+                    "offset": last_update_id + 1,
+                    "timeout": 30,
+                    "allowed_updates": ["message", "callback_query"],
+                },
                 timeout=40,
             ) or []
             for update in updates:
                 last_update_id = max(last_update_id, int(update.get("update_id", 0)))
+                if update.get("callback_query"):
+                    callback = update["callback_query"]
+                    sender = callback.get("from") or {}
+                    callback_user_id = int(sender.get("id", 0))
+                    if allowed_user_ids and callback_user_id not in allowed_user_ids:
+                        try:
+                            api.answer_callback(str(callback.get("id", "")), "Akses tidak diizinkan")
+                        except ApiError:
+                            pass
+                        continue
+                    handle_callback(callback)
+                    continue
+
                 message = update.get("message") or {}
                 chat = message.get("chat") or {}
                 sender = message.get("from") or {}
@@ -412,8 +779,34 @@ def main() -> None:
                         "Kirim mint token Solana untuk cek APR Meteora DLMM.\n\n"
                         "Contoh:\n"
                         "So11111111111111111111111111111111111111112\n\n"
-                        "Bisa juga: /apr <mint>",
+                        "Bisa juga: /apr <mint>\n\n"
+                        "Setelah hasil muncul, tekan 🔔 Set Alert untuk menerima update APR dan volume berkala.\n"
+                        "Gunakan /alerts untuk melihat alert aktif.",
                     )
+                    continue
+
+                if text == "/alerts":
+                    send_alert_list(chat_id)
+                    continue
+
+                if text == "/stopalerts":
+                    before = len(alerts)
+                    alerts[:] = [alert for alert in alerts if str(alert.get("chat_id")) != str(chat_id)]
+                    if len(alerts) != before:
+                        save_alerts(alerts)
+                    api.send(chat_id, "🔕 Semua alert di chat ini sudah dimatikan.")
+                    continue
+
+                pending_key = (int(chat_id), user_id)
+                if pending_key in pending_custom_interval:
+                    try:
+                        minutes = int(text)
+                        if not 1 <= minutes <= 1440:
+                            raise ValueError
+                        pool_address = pending_custom_interval.pop(pending_key)
+                        enable_alert(chat_id, user_id, pool_address, minutes)
+                    except ValueError:
+                        api.send(chat_id, "Masukkan angka menit antara 1 dan 1440. Contoh: 20")
                     continue
 
                 mint = command_argument(text)
@@ -435,9 +828,9 @@ def main() -> None:
                         partial = False
                     except ApiError:
                         pools, partial = meteora.find_pools_for_mint(mint)
-                    display_pools, filtered_count = select_pools_for_display(pools, min_pool_tvl)
-                    display_pools = display_pools[:max_items]
-                    meteora.enrich_with_15m_volume(display_pools)
+                    display_pools, filtered_count = prepare_display_pools(
+                        mint, pools, meteora, max_items, min_pool_tvl
+                    )
                     api.send(
                         chat_id,
                         render_pools(
@@ -449,6 +842,7 @@ def main() -> None:
                             filtered_count,
                         ),
                         parse_mode="HTML",
+                        reply_markup=alert_keyboard(mint) if display_pools else None,
                     )
                 except ApiError as exc:
                     api.send(chat_id, f"Gagal mengambil data Meteora: {exc}")

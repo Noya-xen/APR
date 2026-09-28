@@ -14,6 +14,7 @@ Bot Telegram read-only untuk menerima mint token Solana lalu menampilkan pool Me
 - Menampilkan fee dasar dan bin step setiap pool.
 - Menggunakan format HTML Telegram agar output lebih rapi.
 - Menyaring pool dengan TVL sangat kecil agar APR tidak menyesatkan.
+- Menyediakan alert berkala untuk pool tertentu dengan interval default 15 menit.
 - Tidak meminta private key dan tidak mengirim transaksi.
 - Mengambil data dari Meteora DLMM Data API resmi.
 
@@ -31,8 +32,12 @@ python bot.py
 ## Perintah Telegram
 
 - `/start` atau `/help`
+- `/alerts` untuk melihat alert aktif.
+- `/stopalerts` untuk mematikan semua alert pada chat.
 - Kirim mint token, misalnya `So11111111111111111111111111111111111111112`
 - `/apr <mint>`
+
+Setelah hasil pool muncul, tekan `🔔 Set Alert`, pilih pool, lalu pilih interval 5, 15, 30, 60 menit, atau masukkan interval custom 1–1440 menit. Konfigurasi alert tersimpan di `alerts.json` dan file tersebut tidak di-upload ke GitHub.
 
 ## Catatan APR
 
