@@ -248,12 +248,16 @@ class MeteoraClient:
         return pools, partial
 
 
-def pool_line(pool: PoolResult, index: int, mint: str) -> str:
+def pool_line(pool: PoolResult, index: int, mint: str, min_tvl: float) -> str:
     volume_24h = (pool.raw.get("volume") or {}).get("24h")
     volume_1h = (pool.raw.get("volume") or {}).get("1h")
     token = pool.token_x if pool.token_x.get("address", "").lower() == mint.lower() else pool.token_y
     config = pool.raw.get("pool_config") or {}
     bin_step = config.get("bin_step", "-")
+    tvl = number(pool.raw.get("tvl"))
+    apr_is_reliable = tvl >= min_tvl and number(volume_24h) > 0
+    fee_apr_text = percent(pool.fee_apr) if apr_is_reliable else "N/A (TVL rendah)"
+    total_apr_text = percent(pool.total_apr) if apr_is_reliable else "N/A (TVL rendah)"
     return (
         f"<b>{index}. {html_escape(str(pool.name))}</b>\n"
         f"   🏊 Pool: <code>{html_escape(pool.address)}</code>\n"
@@ -261,13 +265,37 @@ def pool_line(pool: PoolResult, index: int, mint: str) -> str:
         f"   📈 Volume 15m: {money(pool.raw.get('_volume_15m'))} | 1h: {money(volume_1h)}\n"
         f"   📅 Volume 24h: {money(volume_24h)}\n"
         f"   ⚙️ Fee: {fee_percent(config.get('base_fee_pct'))} | Bin step: {html_escape(str(bin_step))}\n"
-        f"   💸 Fee APR 24h: <b>{percent(pool.fee_apr)}</b>\n"
+        f"   💸 Fee APR 24h: <b>{fee_apr_text}</b>\n"
         f"   🌾 Farm APR: {percent(pool.farm_apr)}\n"
-        f"   🚀 Estimasi total APR: <b>{percent(pool.total_apr)}</b>"
+        f"   🚀 Estimasi total APR: <b>{total_apr_text}</b>"
     )
 
 
-def render_pools(mint: str, pools: list[PoolResult], partial: bool, max_items: int = 10) -> str:
+def select_pools_for_display(pools: list[PoolResult], min_tvl: float) -> tuple[list[PoolResult], int]:
+    """Prioritaskan pool aktif dan sembunyikan pool dengan TVL sangat kecil."""
+    usable = [
+        pool
+        for pool in pools
+        if number(pool.raw.get("tvl")) >= min_tvl
+        and number((pool.raw.get("volume") or {}).get("24h")) > 0
+    ]
+    if usable:
+        usable.sort(key=lambda pool: pool.total_apr, reverse=True)
+        return usable, len(pools) - len(usable)
+
+    # Jika semua pool kecil, tetap tampilkan datanya tetapi APR akan ditandai N/A.
+    fallback = sorted(pools, key=lambda pool: number(pool.raw.get("tvl")), reverse=True)
+    return fallback, 0
+
+
+def render_pools(
+    mint: str,
+    pools: list[PoolResult],
+    partial: bool,
+    max_items: int = 10,
+    min_tvl: float = 1_000.0,
+    filtered_count: int = 0,
+) -> str:
     if not pools:
         return (
             "Tidak ada pool Meteora DLMM untuk mint ini.\n\n"
@@ -286,11 +314,13 @@ def render_pools(mint: str, pools: list[PoolResult], partial: bool, max_items: i
         f"{name} ({symbol})",
         f"🏷 Market Cap: <b>{money(token.get('market_cap'))}</b>",
         f"🔑 Mint: <code>{html_escape(mint)}</code>",
-        f"🔎 Pool ditemukan: {len(pools)} | Ditampilkan: {len(shown)}",
+        f"🔎 Pool ditemukan: {len(pools) + filtered_count} | Ditampilkan: {len(shown)}",
         "",
     ]
-    lines.extend(pool_line(pool, i, mint) for i, pool in enumerate(shown, 1))
+    lines.extend(pool_line(pool, i, mint, min_tvl) for i, pool in enumerate(shown, 1))
     lines.append("")
+    if filtered_count:
+        lines.append(f"⚠️ {filtered_count} pool disembunyikan karena TVL di bawah {money(min_tvl)}.")
     if partial:
         lines.append("⚠️ Hasil pencarian dipotong oleh batas pagination bot.")
 
@@ -344,6 +374,7 @@ def main() -> None:
     allowed_raw = os.getenv("ALLOWED_USER_IDS", "").strip()
     allowed_user_ids = {int(item.strip()) for item in allowed_raw.split(",") if item.strip()} if allowed_raw else set()
     max_items = max(1, min(int(os.getenv("MAX_POOLS_IN_MESSAGE", "10")), 15))
+    min_pool_tvl = max(0.0, float(os.getenv("MIN_POOL_TVL_USD", "1000")))
     cooldown = max(0, int(os.getenv("USER_COOLDOWN_SECONDS", "5")))
     api = TelegramBotApi(token)
     meteora = MeteoraClient(os.getenv("METEORA_API_URL", METEORA_API_DEFAULT))
@@ -404,8 +435,21 @@ def main() -> None:
                         partial = False
                     except ApiError:
                         pools, partial = meteora.find_pools_for_mint(mint)
-                        meteora.enrich_with_15m_volume(pools[:max_items])
-                        api.send(chat_id, render_pools(mint, pools, partial, max_items), parse_mode="HTML")
+                    display_pools, filtered_count = select_pools_for_display(pools, min_pool_tvl)
+                    display_pools = display_pools[:max_items]
+                    meteora.enrich_with_15m_volume(display_pools)
+                    api.send(
+                        chat_id,
+                        render_pools(
+                            mint,
+                            display_pools,
+                            partial,
+                            max_items,
+                            min_pool_tvl,
+                            filtered_count,
+                        ),
+                        parse_mode="HTML",
+                    )
                 except ApiError as exc:
                     api.send(chat_id, f"Gagal mengambil data Meteora: {exc}")
                 except Exception:

@@ -13,6 +13,7 @@ Bot Telegram read-only untuk menerima mint token Solana lalu menampilkan pool Me
 - Menampilkan volume 15 menit, 1 jam, dan 24 jam.
 - Menampilkan fee dasar dan bin step setiap pool.
 - Menggunakan format HTML Telegram agar output lebih rapi.
+- Menyaring pool dengan TVL sangat kecil agar APR tidak menyesatkan.
 - Tidak meminta private key dan tidak mengirim transaksi.
 - Mengambil data dari Meteora DLMM Data API resmi.
 
@@ -35,7 +36,7 @@ python bot.py
 
 ## Catatan APR
 
-Meteora mengembalikan `apr` sebagai APR fee 24 jam dalam bentuk desimal, misalnya `0.3344` berarti `33.44%`. Bot juga menampilkan `farm_apr` dan estimasi total `apr + farm_apr`. API Meteora menyediakan candle volume 5 menit, sehingga volume 15 menit dihitung dari tiga candle 5 menit terakhir. APR dan volume bersifat berubah-ubah dan tidak memperhitungkan impermanent loss.
+Meteora mengembalikan `apr` sebagai APR fee 24 jam dalam bentuk desimal, misalnya `0.3344` berarti `33.44%`. Bot juga menampilkan `farm_apr` dan estimasi total `apr + farm_apr`. API Meteora menyediakan candle volume 5 menit, sehingga volume 15 menit dihitung dari tiga candle 5 menit terakhir. Secara default, pool dengan TVL di bawah `$1,000` disembunyikan; ubah `MIN_POOL_TVL_USD` di `.env` bila diperlukan. APR dan volume bersifat berubah-ubah dan tidak memperhitungkan impermanent loss.
 
 Sumber API: https://dlmm.datapi.meteora.ag/swagger-ui/
 
