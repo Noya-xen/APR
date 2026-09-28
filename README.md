@@ -15,7 +15,7 @@ Bot Telegram read-only untuk menerima mint token Solana atau contract EVM lalu m
 - Menggunakan format HTML Telegram agar output lebih rapi.
 - Menyaring pool dengan TVL sangat kecil agar APR tidak menyesatkan.
 - Menyediakan alert berkala untuk pool tertentu dengan interval default 15 menit.
-- Mendukung pencarian contract EVM pada chain Uniswap yang tersedia melalui `/chains` atau `/evm <chain_id> <contract>`.
+- Mendukung pencarian contract EVM pada Ethereum, Arbitrum, BSC, Robinhood Chain, Arc, dan Base melalui `/chains` atau `/evm <chain_id> <contract>`.
 - Mengambil daftar chain EVM dari endpoint resmi Uniswap dan data pool Uniswap V3 dari subgraph The Graph.
 - Tidak meminta private key dan tidak mengirim transaksi.
 - Mengambil data dari Meteora DLMM Data API dan endpoint/subgraph resmi yang dikonfigurasi.

@@ -27,6 +27,7 @@ MAX_TELEGRAM_MESSAGE = 4096
 ALERTS_FILE = "alerts.json"
 UNISWAP_SUPPORTED_CHAINS_URL = "https://trade-api.gateway.uniswap.org/v1/supported_chains"
 GRAPH_GATEWAY_DEFAULT = "https://gateway.thegraph.com/api"
+UNISWAP_ALLOWED_CHAIN_IDS = (1, 42161, 56, 4663, 5042, 8453)
 
 
 class ApiError(RuntimeError):
@@ -257,24 +258,11 @@ class MeteoraClient:
 
 UNISWAP_CHAIN_NAMES = {
     1: "Ethereum",
-    10: "Optimism",
-    56: "BNB Chain",
-    130: "Unichain",
-    137: "Polygon",
-    324: "zkSync Era",
-    480: "World Chain",
+    56: "BSC (BNB Smart Chain)",
+    4663: "Robinhood Chain",
+    5042: "Arc",
     8453: "Base",
     42161: "Arbitrum One",
-    42220: "Celo",
-    43114: "Avalanche",
-    59144: "Linea",
-    81457: "Blast",
-    7777777: "Zora",
-    57073: "Ink",
-    1868: "Soneium",
-    196: "X Layer",
-    4326: "MegaETH",
-    143: "Monad",
 }
 
 
@@ -388,7 +376,8 @@ class UniswapClient:
                 continue
             name = str(row.get("name") or row.get("chainName") or UNISWAP_CHAIN_NAMES.get(chain_id, f"Chain {chain_id}"))
             chains.append({"id": chain_id, "name": name, "configured": chain_id in self.subgraph_ids})
-        self._chains_cache = sorted(chains, key=lambda item: item["name"].lower())
+        chains = [chain for chain in chains if chain["id"] in UNISWAP_ALLOWED_CHAIN_IDS]
+        self._chains_cache = sorted(chains, key=lambda item: UNISWAP_ALLOWED_CHAIN_IDS.index(item["id"]))
         return self._chains_cache
 
     def _graph_query(self, chain_id: int, query: str) -> dict[str, Any]:
@@ -662,6 +651,10 @@ def valid_mint(value: str) -> bool:
 
 def valid_evm_address(value: str) -> bool:
     return bool(EVM_ADDRESS_RE.fullmatch(value))
+
+
+def valid_uniswap_chain(chain_id: int) -> bool:
+    return chain_id in UNISWAP_ALLOWED_CHAIN_IDS
 
 
 def evm_command_parts(text: str) -> tuple[int | None, str]:
@@ -1143,6 +1136,9 @@ def main() -> None:
             except ValueError:
                 api.send(chat_id, "Chain ID tidak valid.")
                 return
+            if not valid_uniswap_chain(chain_id):
+                api.send(chat_id, "Chain tersebut tidak diaktifkan untuk bot ini.")
+                return
             address = pending_evm_address.pop((int(chat_id), user_id), "")
             if not address:
                 api.send(chat_id, "Sesi pemilihan chain sudah habis. Kirim ulang /evm <contract>.")
@@ -1425,6 +1421,9 @@ def main() -> None:
                             )
                         except ApiError as exc:
                             api.send(chat_id, f"Gagal mengambil daftar chain Uniswap: {html_escape(str(exc))}")
+                        continue
+                    if not valid_uniswap_chain(requested_chain):
+                        api.send(chat_id, "Chain yang dipilih belum diaktifkan. Gunakan /chains untuk melihat pilihan yang tersedia.")
                         continue
                     api.send(chat_id, f"Sedang mengambil data Uniswap V3 di {html_escape(chain_name(requested_chain))}…")
                     try:
