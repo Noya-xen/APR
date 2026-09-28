@@ -7,6 +7,7 @@ dan hanya memakai Meteora DLMM Data API serta Telegram Bot API.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import sys
@@ -309,6 +310,27 @@ class UniswapClient:
     }
     """
 
+    TOKEN_QUERY_V4 = """
+    {
+      token(id: \"{token}\") {
+        id symbol name decimals totalSupply derivedETH totalValueLockedUSD
+      }
+      bundle(id: \"1\") { ethPriceUSD }
+      pools0: pools(first: 50, orderBy: totalValueLockedUSD, orderDirection: desc,
+        where: { token0: \"{token}\" }) {
+        id feeTier tickSpacing hooks totalValueLockedUSD volumeUSD feesUSD
+        token0 { id symbol name decimals }
+        token1 { id symbol name decimals }
+      }
+      pools1: pools(first: 50, orderBy: totalValueLockedUSD, orderDirection: desc,
+        where: { token1: \"{token}\" }) {
+        id feeTier tickSpacing hooks totalValueLockedUSD volumeUSD feesUSD
+        token0 { id symbol name decimals }
+        token1 { id symbol name decimals }
+      }
+    }
+    """
+
     SWAPS_QUERY = """
     {
       swaps(first: 1000, orderBy: timestamp, orderDirection: desc,
@@ -324,12 +346,19 @@ class UniswapClient:
         self.graph_base = os.getenv("THE_GRAPH_GATEWAY_URL", GRAPH_GATEWAY_DEFAULT).rstrip("/")
         self.max_pools = max(1, min(int(os.getenv("UNISWAP_MAX_POOLS", "10")), 20))
         self._chains_cache: list[dict[str, Any]] | None = None
-        self.subgraph_ids = self._load_subgraph_ids()
+        self.subgraph_ids = self._load_subgraph_ids(
+            "UNISWAP_SUBGRAPH_IDS",
+            "5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV",
+        )
+        self.v4_subgraph_ids = self._load_subgraph_ids(
+            "UNISWAP_V4_SUBGRAPH_IDS",
+            "DiYPVdygkfjDWhbxGSqAQxwBKmfKnkWQojqeM2rkLb3G",
+        )
 
     @staticmethod
-    def _load_subgraph_ids() -> dict[int, str]:
+    def _load_subgraph_ids(env_name: str, default_mainnet_id: str) -> dict[int, str]:
         """Parse CHAIN_ID:SUBGRAPH_ID;CHAIN_ID:SUBGRAPH_ID from .env."""
-        raw = os.getenv("UNISWAP_SUBGRAPH_IDS", "").strip()
+        raw = os.getenv(env_name, "").strip()
         mapping: dict[int, str] = {}
         for item in raw.split(";"):
             if ":" not in item:
@@ -341,8 +370,8 @@ class UniswapClient:
                 continue
             if subgraph_id.strip():
                 mapping[chain] = subgraph_id.strip()
-        # Official Uniswap v3 mainnet deployment documented by Uniswap.
-        mapping.setdefault(1, "5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV")
+        # Official Uniswap deployment documented by Uniswap for Ethereum mainnet.
+        mapping.setdefault(1, default_mainnet_id)
         return mapping
 
     def _require_keys(self) -> None:
@@ -375,18 +404,24 @@ class UniswapClient:
             except (TypeError, ValueError):
                 continue
             name = str(row.get("name") or row.get("chainName") or UNISWAP_CHAIN_NAMES.get(chain_id, f"Chain {chain_id}"))
-            chains.append({"id": chain_id, "name": name, "configured": chain_id in self.subgraph_ids})
+            chains.append({
+                "id": chain_id,
+                "name": name,
+                "v3_configured": chain_id in self.subgraph_ids,
+                "v4_configured": chain_id in self.v4_subgraph_ids,
+            })
         chains = [chain for chain in chains if chain["id"] in UNISWAP_ALLOWED_CHAIN_IDS]
         self._chains_cache = sorted(chains, key=lambda item: UNISWAP_ALLOWED_CHAIN_IDS.index(item["id"]))
         return self._chains_cache
 
-    def _graph_query(self, chain_id: int, query: str) -> dict[str, Any]:
+    def _graph_query(self, chain_id: int, query: str, protocol: str = "v3") -> dict[str, Any]:
         self._require_keys()
-        subgraph_id = self.subgraph_ids.get(chain_id)
+        subgraph_map = self.v4_subgraph_ids if protocol == "v4" else self.subgraph_ids
+        subgraph_id = subgraph_map.get(chain_id)
         if not subgraph_id:
             raise ApiError(
-                f"Subgraph Uniswap v3 untuk chain {chain_id} belum dikonfigurasi. "
-                "Tambahkan CHAIN_ID:SUBGRAPH_ID ke UNISWAP_SUBGRAPH_IDS."
+                f"Subgraph Uniswap {protocol.upper()} untuk chain {chain_id} belum dikonfigurasi. "
+                f"Tambahkan CHAIN_ID:SUBGRAPH_ID ke {'UNISWAP_V4_SUBGRAPH_IDS' if protocol == 'v4' else 'UNISWAP_SUBGRAPH_IDS'}."
             )
         url = f"{self.graph_base}/{urllib.parse.quote(self.graph_key, safe='')}/subgraphs/id/{urllib.parse.quote(subgraph_id, safe='')}"
         response = request_json(
@@ -405,8 +440,12 @@ class UniswapClient:
             raise ApiError("The Graph tidak mengembalikan data")
         return data
 
-    def _pool_swaps(self, chain_id: int, pool_address: str, since: int) -> tuple[float, bool]:
-        data = self._graph_query(chain_id, self.SWAPS_QUERY.format(pool=pool_address.lower(), since=since))
+    def _pool_swaps(self, chain_id: int, pool_address: str, since: int, protocol: str) -> tuple[float, bool]:
+        data = self._graph_query(
+            chain_id,
+            self.SWAPS_QUERY.format(pool=pool_address.lower(), since=since),
+            protocol,
+        )
         rows = data.get("swaps") or []
         if not isinstance(rows, list):
             return 0.0, False
@@ -414,9 +453,17 @@ class UniswapClient:
         # 1000 is The Graph's common per-collection maximum; mark the value as partial.
         return amount, len(rows) >= 1000
 
-    def find_pools_for_token(self, chain_id: int, token_address: str) -> tuple[dict[str, Any], list[EvmPoolResult]]:
+    def find_pools_for_token(
+        self,
+        chain_id: int,
+        token_address: str,
+        protocol: str = "v3",
+    ) -> tuple[dict[str, Any], list[EvmPoolResult]]:
+        if protocol not in ("v3", "v4"):
+            raise ApiError("Protocol Uniswap tidak valid")
         token_address = token_address.lower()
-        data = self._graph_query(chain_id, self.TOKEN_QUERY.format(token=token_address))
+        query_template = self.TOKEN_QUERY_V4 if protocol == "v4" else self.TOKEN_QUERY
+        data = self._graph_query(chain_id, query_template.format(token=token_address), protocol)
         token = data.get("token") or {}
         pool_rows: dict[str, dict[str, Any]] = {}
         for row in (data.get("pools0") or []) + (data.get("pools1") or []):
@@ -437,7 +484,10 @@ class UniswapClient:
                     "token1": row.get("token1") or {},
                     "tvl": number(row.get("totalValueLockedUSD")),
                     "fee_tier": number(row.get("feeTier")),
+                    "tick_spacing": row.get("tickSpacing"),
+                    "hooks": row.get("hooks"),
                     "chain_id": chain_id,
+                    "protocol": protocol,
                     "volume_24h": 0.0,
                     "volume_1h": 0.0,
                     "volume_15m": 0.0,
@@ -445,9 +495,9 @@ class UniswapClient:
                     "swaps_partial": False,
                 }
             )
-            volume_24h, partial = self._pool_swaps(chain_id, pool.address, now - 24 * 3600)
-            volume_1h, partial_1h = self._pool_swaps(chain_id, pool.address, now - 3600)
-            volume_15m, partial_15m = self._pool_swaps(chain_id, pool.address, now - 15 * 60)
+            volume_24h, partial = self._pool_swaps(chain_id, pool.address, now - 24 * 3600, protocol)
+            volume_1h, partial_1h = self._pool_swaps(chain_id, pool.address, now - 3600, protocol)
+            volume_15m, partial_15m = self._pool_swaps(chain_id, pool.address, now - 15 * 60, protocol)
             raw = pool.raw
             raw["volume_24h"] = volume_24h
             raw["volume_1h"] = volume_1h
@@ -555,18 +605,26 @@ def evm_fee_percent(pool: EvmPoolResult) -> str:
     return f"{pool.fee_tier:,.4f}%"
 
 
+def evm_pool_ref(pool_address: str) -> str:
+    """Short deterministic reference for Telegram callback_data (pool IDs can be bytes32)."""
+    return hashlib.sha256(pool_address.lower().encode("utf-8")).hexdigest()[:10]
+
+
 def evm_pool_line(pool: EvmPoolResult, index: int) -> str:
     raw = pool.raw
     fee_apr = raw.get("fee_apr")
     fee_apr_text = percent(fee_apr) if fee_apr is not None else "N/A"
     partial_text = " ⚠️" if raw.get("swaps_partial") else ""
+    protocol = str(raw.get("protocol", "v3")).upper()
+    extra = f" | Tick spacing: {html_escape(str(raw.get('tick_spacing')))}" if protocol == "V4" else ""
+    hooks = f"\n   🪝 Hook: <code>{html_escape(str(raw.get('hooks')))}</code>" if protocol == "V4" and raw.get("hooks") else ""
     return (
         f"<b>{index}. {html_escape(pool.name)}</b>\n"
         f"   🏊 Pool: <code>{html_escape(pool.address)}</code>\n"
         f"   💧 TVL: {money(raw.get('tvl'))}\n"
         f"   📈 Volume 15m: {money(raw.get('volume_15m'))} | 1h: {money(raw.get('volume_1h'))}{partial_text}\n"
         f"   📅 Volume 24h: {money(raw.get('volume_24h'))}\n"
-        f"   ⚙️ Fee: {evm_fee_percent(pool)} | Protocol: Uniswap V3\n"
+        f"   ⚙️ Fee: {evm_fee_percent(pool)} | Protocol: Uniswap {protocol}{extra}{hooks}\n"
         f"   💸 Fee APR 24h: <b>{fee_apr_text}</b>\n"
         "   🌾 Farm APR: N/A (tidak ada data insentif Uniswap)\n"
         f"   🚀 Estimasi total APR: <b>{fee_apr_text}</b>"
@@ -595,7 +653,7 @@ def render_evm_pools(
     market_cap = evm_market_cap(token, token_data.get("bundle") or {})
     shown = pools[:max_items]
     lines = [
-        "<b>🟣 UNISWAP V3</b>",
+        f"<b>🟣 UNISWAP {html_escape(str((pools[0].raw.get('protocol') or 'v3')).upper())}</b>",
         "━━━━━━━━━━━━━━━━━━",
         "",
         f"🌐 <b>Chain:</b> {html_escape(chain_name)} ({chain_id})",
@@ -710,18 +768,35 @@ def alert_keyboard(mint: str) -> dict[str, Any]:
 def evm_chain_keyboard(chains: list[dict[str, Any]]) -> dict[str, Any]:
     rows = []
     for chain in chains:
-        status = "✅" if chain.get("configured") else "⚙️"
+        versions = "/".join(
+            version
+            for version, configured in (("V3", chain.get("v3_configured")), ("V4", chain.get("v4_configured")))
+            if configured
+        ) or "setup"
         rows.append([{
-            "text": f"{status} {chain.get('name')} ({chain.get('id')})",
+            "text": f"{versions} · {chain.get('name')} ({chain.get('id')})",
             "callback_data": f"evmchain:{chain.get('id')}",
         }])
     return {"inline_keyboard": rows}
 
 
-def evm_alert_keyboard(chain_id: int, token_address: str) -> dict[str, Any]:
+def evm_protocol_keyboard(chain_id: int, address: str, client: UniswapClient) -> dict[str, Any]:
+    chain = next((item for item in client._chains_cache or [] if item.get("id") == chain_id), {})
+    rows = []
+    if chain.get("v3_configured"):
+        rows.append([{"text": "🟣 Uniswap V3", "callback_data": f"evmprotocol:{chain_id}:v3"}])
+    if chain.get("v4_configured"):
+        rows.append([{"text": "🔵 Uniswap V4", "callback_data": f"evmprotocol:{chain_id}:v4"}])
+    if not rows:
+        rows.append([{"text": "⚙️ Subgraph belum dikonfigurasi", "callback_data": "cancelalert"}])
+    rows.append([{"text": "✖️ Batal", "callback_data": "cancelalert"}])
+    return {"inline_keyboard": rows}
+
+
+def evm_alert_keyboard(chain_id: int, token_address: str, protocol: str) -> dict[str, Any]:
     return {
         "inline_keyboard": [
-            [{"text": "🔔 Set Alert Uniswap", "callback_data": f"eam:{chain_id}:{token_address}"}],
+            [{"text": f"🔔 Set Alert Uniswap {protocol.upper()}", "callback_data": f"eam:{protocol}:{chain_id}:{token_address}"}],
             [{"text": "📋 Alert Aktif", "callback_data": "alertlist"}],
         ]
     }
@@ -731,7 +806,7 @@ def evm_pool_choice_keyboard(chain_id: int, pools: list[EvmPoolResult]) -> dict[
     rows = [
         [{
             "text": f"🔔 {pool.name} | TVL {money(pool.raw.get('tvl'))}",
-            "callback_data": f"eap:{chain_id}:{pool.address}",
+            "callback_data": f"eap:{pool.raw.get('protocol', 'v3')}:{chain_id}:{evm_pool_ref(pool.address)}",
         }]
         for pool in pools
     ]
@@ -739,28 +814,28 @@ def evm_pool_choice_keyboard(chain_id: int, pools: list[EvmPoolResult]) -> dict[
     return {"inline_keyboard": rows}
 
 
-def evm_interval_keyboard(chain_id: int, pool_address: str) -> dict[str, Any]:
+def evm_interval_keyboard(protocol: str, chain_id: int, pool_ref: str) -> dict[str, Any]:
     return {
         "inline_keyboard": [
             [
-                {"text": "5 menit", "callback_data": f"ei:{chain_id}:{pool_address}:5"},
-                {"text": "15 menit (default)", "callback_data": f"ei:{chain_id}:{pool_address}:15"},
+                {"text": "5 menit", "callback_data": f"ei:{protocol}:{chain_id}:{pool_ref}:5"},
+                {"text": "15 menit (default)", "callback_data": f"ei:{protocol}:{chain_id}:{pool_ref}:15"},
             ],
             [
-                {"text": "30 menit", "callback_data": f"ei:{chain_id}:{pool_address}:30"},
-                {"text": "60 menit", "callback_data": f"ei:{chain_id}:{pool_address}:60"},
+                {"text": "30 menit", "callback_data": f"ei:{protocol}:{chain_id}:{pool_ref}:30"},
+                {"text": "60 menit", "callback_data": f"ei:{protocol}:{chain_id}:{pool_ref}:60"},
             ],
-            [{"text": "✏️ Custom menit", "callback_data": f"ec:{chain_id}:{pool_address}"}],
+            [{"text": "✏️ Custom menit", "callback_data": f"ec:{protocol}:{chain_id}:{pool_ref}"}],
             [{"text": "✖️ Batal", "callback_data": "cancelalert"}],
         ]
     }
 
 
-def evm_alert_control_keyboard(chain_id: int, pool_address: str) -> dict[str, Any]:
+def evm_alert_control_keyboard(protocol: str, chain_id: int, pool_address: str) -> dict[str, Any]:
     return {
         "inline_keyboard": [[{
             "text": "🔕 Matikan alert",
-            "callback_data": f"es:{chain_id}:{pool_address}",
+            "callback_data": f"es:{protocol}:{chain_id}:{evm_pool_ref(pool_address)}",
         }]]
     }
 
@@ -841,12 +916,13 @@ def upsert_evm_alert(
     user_id: int,
     token_address: str,
     chain_id: int,
+    protocol: str,
     pool: EvmPoolResult,
     interval_minutes: int,
 ) -> dict[str, Any]:
     now = time.time()
     record = {
-        "id": f"{chat_id}:uniswap:{chain_id}:{pool.address}",
+        "id": f"{chat_id}:uniswap:{protocol}:{chain_id}:{pool.address}",
         "chat_id": chat_id,
         "user_id": user_id,
         "mint": token_address,
@@ -854,6 +930,7 @@ def upsert_evm_alert(
         "pool_name": pool.name,
         "provider": "uniswap",
         "chain_id": chain_id,
+        "protocol": protocol,
         "interval_minutes": interval_minutes,
         "next_run": now + interval_minutes * 60,
         "active": True,
@@ -906,7 +983,8 @@ def send_due_alerts(
             if alert.get("provider") == "uniswap":
                 chain_id = int(alert["chain_id"])
                 token_address = str(alert["mint"])
-                token_data, pools = uniswap.find_pools_for_token(chain_id, token_address)
+                protocol = str(alert.get("protocol", "v3"))
+                token_data, pools = uniswap.find_pools_for_token(chain_id, token_address, protocol)
                 pool = next((item for item in pools if item.address.lower() == str(alert["pool_address"]).lower()), None)
                 if pool is None:
                     raise ApiError("Pool Uniswap tidak ditemukan")
@@ -921,7 +999,7 @@ def send_due_alerts(
                         max_items=1,
                     )
                 )
-                markup = evm_alert_control_keyboard(chain_id, pool.address)
+                markup = evm_alert_control_keyboard(protocol, chain_id, pool.address)
             else:
                 pool = meteora.get_pool(str(alert["pool_address"]))
                 meteora.enrich_with_15m_volume([pool])
@@ -1019,14 +1097,26 @@ def main() -> None:
                 return str(chain.get("name"))
         return UNISWAP_CHAIN_NAMES.get(chain_id, f"Chain {chain_id}")
 
-    def send_evm_report(chat_id: int, chain_id: int, address: str) -> None:
-        token_data, pools = uniswap.find_pools_for_token(chain_id, address)
+    def send_evm_report(chat_id: int, chain_id: int, address: str, protocol: str) -> None:
+        token_data, pools = uniswap.find_pools_for_token(chain_id, address, protocol)
         api.send(
             chat_id,
             render_evm_pools(address, chain_id, chain_name(chain_id), token_data, pools, max_items),
             parse_mode="HTML",
-            reply_markup=evm_alert_keyboard(chain_id, address) if pools else None,
+            reply_markup=evm_alert_keyboard(chain_id, address, protocol) if pools else None,
         )
+
+    def find_evm_pool_by_ref(
+        chain_id: int,
+        protocol: str,
+        token_address: str,
+        pool_ref: str,
+    ) -> EvmPoolResult:
+        _, pools = uniswap.find_pools_for_token(chain_id, token_address, protocol)
+        pool = next((item for item in pools if evm_pool_ref(item.address) == pool_ref), None)
+        if pool is None:
+            raise ApiError("Pool Uniswap sudah berubah atau tidak ditemukan")
+        return pool
 
     def enable_alert(chat_id: int, user_id: int, pool_address: str, minutes: int) -> None:
         entry = pool_catalog.get(pool_address)
@@ -1062,9 +1152,9 @@ def main() -> None:
         except (ApiError, KeyError, ValueError, TypeError) as exc:
             api.send(chat_id, f"Gagal mengaktifkan alert: {exc}")
 
-    def enable_evm_alert(chat_id: int, user_id: int, chain_id: int, token_address: str, pool_address: str, minutes: int) -> None:
+    def enable_evm_alert(chat_id: int, user_id: int, protocol: str, chain_id: int, token_address: str, pool_address: str, minutes: int) -> None:
         try:
-            token_data, pools = uniswap.find_pools_for_token(chain_id, token_address)
+            token_data, pools = uniswap.find_pools_for_token(chain_id, token_address, protocol)
             pool = next((item for item in pools if item.address.lower() == pool_address.lower()), None)
             if pool is None:
                 raise ApiError("Pool Uniswap tidak ditemukan")
@@ -1074,6 +1164,7 @@ def main() -> None:
                 user_id=user_id,
                 token_address=token_address,
                 chain_id=chain_id,
+                protocol=protocol,
                 pool=pool,
                 interval_minutes=minutes,
             )
@@ -1081,14 +1172,14 @@ def main() -> None:
             api.send(
                 chat_id,
                 (
-                    f"<b>✅ Alert Uniswap aktif</b>\n\n"
+                    f"<b>✅ Alert Uniswap {protocol.upper()} aktif</b>\n\n"
                     f"Chain: <b>{html_escape(chain_name(chain_id))}</b>\n"
                     f"Pool: <b>{html_escape(str(record['pool_name']))}</b>\n"
                     f"Interval: <b>{minutes} menit</b>\n\n"
                     "Bot akan mengirim APR dan volume terbaru secara berkala."
                 ),
                 parse_mode="HTML",
-                reply_markup=evm_alert_control_keyboard(chain_id, pool_address),
+                reply_markup=evm_alert_control_keyboard(protocol, chain_id, pool_address),
             )
         except (ApiError, KeyError, ValueError, TypeError) as exc:
             api.send(chat_id, f"Gagal mengaktifkan alert Uniswap: {html_escape(str(exc))}")
@@ -1105,10 +1196,14 @@ def main() -> None:
             name = html_escape(str(alert.get("pool_name", "Pool")))
             minutes = int(alert.get("interval_minutes", 15))
             provider = str(alert.get("provider", "meteora"))
-            chain_text = f" · {chain_name(int(alert['chain_id']))}" if provider == "uniswap" and alert.get("chain_id") else ""
-            lines.append(f"{index}. <b>{name}</b>{html_escape(chain_text)} — setiap {minutes} menit")
+            chain_text = ""
+            protocol_text = ""
+            if provider == "uniswap" and alert.get("chain_id"):
+                chain_text = f" · {chain_name(int(alert['chain_id']))}"
+                protocol_text = f" · {str(alert.get('protocol', 'v3')).upper()}"
+            lines.append(f"{index}. <b>{name}</b>{html_escape(chain_text + protocol_text)} — setiap {minutes} menit")
             if provider == "uniswap":
-                callback_data = f"es:{int(alert['chain_id'])}:{alert.get('pool_address', '')}"
+                callback_data = f"es:{alert.get('protocol', 'v3')}:{int(alert['chain_id'])}:{evm_pool_ref(str(alert.get('pool_address', '')))}"
             else:
                 callback_data = f"stop:{alert.get('pool_address', '')}"
             rows.append([{"text": f"🔕 Matikan {index}", "callback_data": callback_data}])
@@ -1143,10 +1238,34 @@ def main() -> None:
             if not address:
                 api.send(chat_id, "Sesi pemilihan chain sudah habis. Kirim ulang /evm <contract>.")
                 return
-            api.send(chat_id, f"Sedang mengambil data Uniswap V3 di {html_escape(chain_name(chain_id))}…")
+            pending_evm_address[(int(chat_id), user_id)] = address
+            api.send(
+                chat_id,
+                f"Pilih versi Uniswap untuk {html_escape(chain_name(chain_id))}:",
+                parse_mode="HTML",
+                reply_markup=evm_protocol_keyboard(chain_id, address, uniswap),
+            )
+            return
+
+        if data.startswith("evmprotocol:"):
+            parts = data.split(":", 2)
+            if len(parts) != 3 or parts[2] not in ("v3", "v4"):
+                api.send(chat_id, "Versi Uniswap tidak valid.")
+                return
             try:
-                pending_evm_address[(int(chat_id), user_id)] = f"{chain_id}:{address}"
-                send_evm_report(int(chat_id), chain_id, address)
+                chain_id = int(parts[1])
+            except ValueError:
+                api.send(chat_id, "Chain ID tidak valid.")
+                return
+            address = pending_evm_address.pop((int(chat_id), user_id), "")
+            if not address:
+                api.send(chat_id, "Sesi pemilihan versi sudah habis. Kirim ulang contract EVM.")
+                return
+            protocol = parts[2]
+            api.send(chat_id, f"Sedang mengambil data Uniswap {protocol.upper()} di {html_escape(chain_name(chain_id))}…")
+            try:
+                pending_evm_address[(int(chat_id), user_id)] = f"{chain_id}:{protocol}:{address}"
+                send_evm_report(int(chat_id), chain_id, address, protocol)
             except ApiError as exc:
                 api.send(chat_id, f"Gagal mengambil data Uniswap: {html_escape(str(exc))}")
             return
@@ -1161,17 +1280,18 @@ def main() -> None:
             return
 
         if data.startswith("eam:"):
-            parts = data.split(":", 2)
-            if len(parts) != 3:
+            parts = data.split(":", 3)
+            if len(parts) != 4 or parts[1] not in ("v3", "v4"):
                 api.send(chat_id, "Data alert Uniswap tidak valid.")
                 return
             try:
-                chain_id = int(parts[1])
+                chain_id = int(parts[2])
             except ValueError:
                 api.send(chat_id, "Chain ID tidak valid.")
                 return
+            protocol = parts[1]
             try:
-                _, pools = uniswap.find_pools_for_token(chain_id, parts[2])
+                _, pools = uniswap.find_pools_for_token(chain_id, parts[3], protocol)
                 if not pools:
                     api.send(chat_id, "Pool Uniswap tidak ditemukan.")
                     return
@@ -1181,81 +1301,94 @@ def main() -> None:
                     parse_mode="HTML",
                     reply_markup=evm_pool_choice_keyboard(chain_id, pools),
                 )
-                pending_evm_address[(int(chat_id), user_id)] = f"{chain_id}:{parts[2]}"
+                pending_evm_address[(int(chat_id), user_id)] = f"{chain_id}:{protocol}:{parts[3]}"
             except ApiError as exc:
                 api.send(chat_id, f"Gagal mengambil pool Uniswap: {html_escape(str(exc))}")
             return
 
         if data.startswith("eap:"):
-            parts = data.split(":", 2)
-            if len(parts) != 3:
+            parts = data.split(":", 3)
+            if len(parts) != 4 or parts[1] not in ("v3", "v4"):
                 api.send(chat_id, "Data pool Uniswap tidak valid.")
                 return
             try:
-                chain_id = int(parts[1])
-                pool_address = parts[2]
+                chain_id = int(parts[2])
             except ValueError:
                 api.send(chat_id, "Chain ID tidak valid.")
                 return
             # The token address is attached to the most recent EVM report in this chat.
-            token_address = pending_evm_address.get((int(chat_id), user_id), "")
-            if not token_address:
+            state = pending_evm_address.get((int(chat_id), user_id), "")
+            state_parts = state.split(":", 2)
+            if len(state_parts) != 3:
                 api.send(chat_id, "Sesi token sudah habis. Kirim ulang contract EVM.")
+                return
+            try:
+                pool = find_evm_pool_by_ref(chain_id, parts[1], state_parts[2], parts[3])
+            except ApiError as exc:
+                api.send(chat_id, f"Gagal mengambil pool Uniswap: {html_escape(str(exc))}")
                 return
             api.send(
                 chat_id,
-                f"Pilih interval alert untuk <b>{html_escape(pool_address)}</b>:",
+                f"Pilih interval alert untuk <b>{html_escape(pool.name)}</b>:",
                 parse_mode="HTML",
-                reply_markup=evm_interval_keyboard(chain_id, pool_address),
+                reply_markup=evm_interval_keyboard(parts[1], chain_id, parts[3]),
             )
-            pending_evm_address[(int(chat_id), user_id)] = f"{chain_id}:{token_address}:{pool_address}"
             return
 
         if data.startswith("ei:"):
-            parts = data.split(":", 3)
-            if len(parts) != 4:
+            parts = data.split(":", 4)
+            if len(parts) != 5 or parts[1] not in ("v3", "v4"):
                 api.send(chat_id, "Data interval Uniswap tidak valid.")
                 return
             try:
-                chain_id = int(parts[1])
-                minutes = max(1, min(int(parts[3]), 1440))
+                chain_id = int(parts[2])
+                minutes = max(1, min(int(parts[4]), 1440))
             except ValueError:
                 api.send(chat_id, "Interval alert tidak valid.")
                 return
             state = pending_evm_address.pop((int(chat_id), user_id), "")
-            state_parts = state.split(":", 1)
-            if len(state_parts) != 2:
+            state_parts = state.split(":", 2)
+            if len(state_parts) != 3:
                 api.send(chat_id, "Sesi token sudah habis. Kirim ulang contract EVM.")
                 return
-            enable_evm_alert(chat_id, user_id, chain_id, state_parts[1], parts[2], minutes)
+            try:
+                pool = find_evm_pool_by_ref(chain_id, parts[1], state_parts[2], parts[3])
+                enable_evm_alert(chat_id, user_id, parts[1], chain_id, state_parts[2], pool.address, minutes)
+            except ApiError as exc:
+                api.send(chat_id, f"Gagal mengaktifkan alert Uniswap: {html_escape(str(exc))}")
             return
 
         if data.startswith("ec:"):
-            parts = data.split(":", 2)
-            if len(parts) != 3:
+            parts = data.split(":", 3)
+            if len(parts) != 4 or parts[1] not in ("v3", "v4"):
                 api.send(chat_id, "Data custom alert Uniswap tidak valid.")
                 return
             try:
-                chain_id = int(parts[1])
+                chain_id = int(parts[2])
             except ValueError:
                 api.send(chat_id, "Chain ID tidak valid.")
                 return
             state = pending_evm_address.get((int(chat_id), user_id), "")
-            state_parts = state.split(":", 1)
-            if len(state_parts) != 2:
+            state_parts = state.split(":", 2)
+            if len(state_parts) != 3:
                 api.send(chat_id, "Sesi token sudah habis. Kirim ulang contract EVM.")
                 return
-            pending_custom_interval[(int(chat_id), user_id)] = f"evm:{chain_id}:{state_parts[1]}:{parts[2]}"
+            try:
+                pool = find_evm_pool_by_ref(chain_id, parts[1], state_parts[2], parts[3])
+                pending_custom_interval[(int(chat_id), user_id)] = f"evm:{parts[1]}:{chain_id}:{state_parts[2]}:{pool.address}"
+            except ApiError as exc:
+                api.send(chat_id, f"Gagal mengambil pool Uniswap: {html_escape(str(exc))}")
+                return
             api.send(chat_id, "Kirim angka interval dalam menit (1–1440). Contoh: 20")
             return
 
         if data.startswith("es:"):
-            parts = data.split(":", 2)
-            if len(parts) != 3:
+            parts = data.split(":", 3)
+            if len(parts) != 4 or parts[1] not in ("v3", "v4"):
                 api.send(chat_id, "Data stop alert Uniswap tidak valid.")
                 return
             try:
-                chain_id = int(parts[1])
+                chain_id = int(parts[2])
             except ValueError:
                 api.send(chat_id, "Chain ID tidak valid.")
                 return
@@ -1265,8 +1398,9 @@ def main() -> None:
                 if not (
                     str(alert.get("chat_id")) == str(chat_id)
                     and alert.get("provider") == "uniswap"
+                    and str(alert.get("protocol", "v3")) == parts[1]
                     and int(alert.get("chain_id", -1)) == chain_id
-                    and str(alert.get("pool_address")).lower() == parts[2].lower()
+                    and evm_pool_ref(str(alert.get("pool_address", ""))) == parts[3]
                 )
             ]
             if len(alerts) != before:
@@ -1392,8 +1526,8 @@ def main() -> None:
                         api.send(
                             chat_id,
                             "<b>🌐 Chain Uniswap yang tersedia</b>\n\n"
-                            "✅ = subgraph sudah dikonfigurasi\n"
-                            "⚙️ = tambahkan subgraph ID di UNISWAP_SUBGRAPH_IDS",
+                            "V3/V4 menandakan versi yang sudah dikonfigurasi.\n"
+                            "⚙️ setup = tambahkan subgraph ID di .env",
                             parse_mode="HTML",
                             reply_markup=evm_chain_keyboard(chains),
                         )
@@ -1425,12 +1559,17 @@ def main() -> None:
                     if not valid_uniswap_chain(requested_chain):
                         api.send(chat_id, "Chain yang dipilih belum diaktifkan. Gunakan /chains untuk melihat pilihan yang tersedia.")
                         continue
-                    api.send(chat_id, f"Sedang mengambil data Uniswap V3 di {html_escape(chain_name(requested_chain))}…")
                     try:
-                        pending_evm_address[(int(chat_id), user_id)] = f"{requested_chain}:{evm_address}"
-                        send_evm_report(int(chat_id), requested_chain, evm_address)
+                        uniswap.get_supported_chains()
+                        pending_evm_address[(int(chat_id), user_id)] = evm_address
+                        api.send(
+                            chat_id,
+                            f"Pilih versi Uniswap untuk {html_escape(chain_name(requested_chain))}:",
+                            parse_mode="HTML",
+                            reply_markup=evm_protocol_keyboard(requested_chain, evm_address, uniswap),
+                        )
                     except ApiError as exc:
-                        api.send(chat_id, f"Gagal mengambil data Uniswap: {html_escape(str(exc))}")
+                        api.send(chat_id, f"Gagal mengambil konfigurasi Uniswap: {html_escape(str(exc))}")
                     continue
 
                 if text in ("/start", "/help"):
@@ -1468,8 +1607,8 @@ def main() -> None:
                             raise ValueError
                         pending_alert = pending_custom_interval.pop(pending_key)
                         if pending_alert.startswith("evm:"):
-                            _, chain_text, token_address, pool_address = pending_alert.split(":", 3)
-                            enable_evm_alert(chat_id, user_id, int(chain_text), token_address, pool_address, minutes)
+                            _, protocol, chain_text, token_address, pool_address = pending_alert.split(":", 4)
+                            enable_evm_alert(chat_id, user_id, protocol, int(chain_text), token_address, pool_address, minutes)
                         else:
                             enable_alert(chat_id, user_id, pending_alert, minutes)
                     except ValueError:

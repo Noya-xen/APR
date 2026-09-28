@@ -16,7 +16,7 @@ Bot Telegram read-only untuk menerima mint token Solana atau contract EVM lalu m
 - Menyaring pool dengan TVL sangat kecil agar APR tidak menyesatkan.
 - Menyediakan alert berkala untuk pool tertentu dengan interval default 15 menit.
 - Mendukung pencarian contract EVM pada Ethereum, Arbitrum, BSC, Robinhood Chain, Arc, dan Base melalui `/chains` atau `/evm <chain_id> <contract>`.
-- Mengambil daftar chain EVM dari endpoint resmi Uniswap dan data pool Uniswap V3 dari subgraph The Graph.
+- Mengambil daftar chain EVM dari endpoint resmi Uniswap dan data pool Uniswap V3/V4 dari subgraph The Graph.
 - Tidak meminta private key dan tidak mengirim transaksi.
 - Mengambil data dari Meteora DLMM Data API dan endpoint/subgraph resmi yang dikonfigurasi.
 
@@ -38,7 +38,7 @@ python bot.py
 - `/alerts` untuk melihat alert aktif.
 - `/stopalerts` untuk mematikan semua alert pada chat.
 - `/chains` untuk menampilkan chain Uniswap yang terdeteksi.
-- `/evm <chain_id> <contract>` untuk langsung mengecek token EVM, atau kirim contract `0x...` lalu pilih chain.
+- `/evm <chain_id> <contract>` untuk langsung mengecek token EVM, atau kirim contract `0x...` lalu pilih chain dan versi Uniswap V3/V4.
 - Kirim mint token, misalnya `So11111111111111111111111111111111111111112`
 - `/apr <mint>`
 
@@ -60,6 +60,6 @@ Sumber API: https://dlmm.datapi.meteora.ag/swagger-ui/
 
 Data APR bukan jaminan profit. Gunakan untuk riset dan lakukan verifikasi sendiri sebelum menyediakan likuiditas.
 
-Untuk Uniswap V3, fee APR dihitung dari estimasi fee swap 24 jam (`volume 24h × fee tier`) dibagi TVL, lalu dianualisasi 365 hari. Uniswap V3 tidak menyediakan farm APR umum pada subgraph, sehingga farm APR ditampilkan sebagai `N/A`. Volume 15 menit, 1 jam, dan 24 jam dihitung dari entitas swap The Graph; jika jumlah swap melewati batas query, bot memberi tanda bahwa volume mungkin terpotong. Satu API key The Graph tidak otomatis menyediakan subgraph ID untuk setiap chain, sehingga ID deployment chain perlu ditambahkan ke `.env`.
+Untuk Uniswap V3/V4, fee APR dihitung dari estimasi fee swap 24 jam (`volume 24h × fee tier`) dibagi TVL, lalu dianualisasi 365 hari. Uniswap tidak menyediakan farm APR umum pada subgraph, sehingga farm APR ditampilkan sebagai `N/A`. Volume 15 menit, 1 jam, dan 24 jam dihitung dari entitas swap The Graph; jika jumlah swap melewati batas query, bot memberi tanda bahwa volume mungkin terpotong. V4 memakai pool ID bytes32 dan hook, bukan alamat kontrak pool seperti V3. Satu API key The Graph tidak otomatis menyediakan subgraph ID untuk setiap chain/version, sehingga ID deployment V3/V4 perlu ditambahkan ke `.env`.
 
 > Built by: Noya-xen | [@xinomixo](https://x.com/XinoMixo)
