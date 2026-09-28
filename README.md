@@ -2,7 +2,7 @@
 
 link project: https://github.com/Noya-xen/APR
 
-Bot Telegram read-only untuk menerima mint token Solana lalu menampilkan pool Meteora DLMM yang ditemukan, APR fee 24 jam, farm APR, TVL, market cap token, serta volume 15 menit, 1 jam, dan 24 jam.
+Bot Telegram read-only untuk menerima mint token Solana lalu menampilkan pool Meteora DLMM yang ditemukan dalam format HTML Telegram dengan emoji, APR fee 24 jam, farm APR, TVL, market cap token, fee pool, bin step, serta volume 15 menit, 1 jam, dan 24 jam.
 
 ## Fitur
 
@@ -11,6 +11,8 @@ Bot Telegram read-only untuk menerima mint token Solana lalu menampilkan pool Me
 - Mencari pool pada sisi `token_x` dan `token_y`.
 - Menampilkan market cap token yang dicari.
 - Menampilkan volume 15 menit, 1 jam, dan 24 jam.
+- Menampilkan fee dasar dan bin step setiap pool.
+- Menggunakan format HTML Telegram agar output lebih rapi.
 - Tidak meminta private key dan tidak mengirim transaksi.
 - Mengambil data dari Meteora DLMM Data API resmi.
 

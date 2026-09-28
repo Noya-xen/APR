@@ -9,12 +9,14 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime
+from html import escape as html_escape
 from typing import Any
 
 
@@ -96,6 +98,11 @@ def money(value: Any) -> str:
 def percent(decimal_apr: Any) -> str:
     # Meteora API mengirim APR dalam bentuk desimal: 0.3344 = 33.44%.
     return f"{number(decimal_apr) * 100:,.2f}%"
+
+
+def fee_percent(value: Any) -> str:
+    # pool_config.base_fee_pct sudah dikirim Meteora dalam satuan persen.
+    return f"{number(value):,.2f}%"
 
 
 def short_address(address: str, chars: int = 6) -> str:
@@ -245,16 +252,18 @@ def pool_line(pool: PoolResult, index: int, mint: str) -> str:
     volume_24h = (pool.raw.get("volume") or {}).get("24h")
     volume_1h = (pool.raw.get("volume") or {}).get("1h")
     token = pool.token_x if pool.token_x.get("address", "").lower() == mint.lower() else pool.token_y
-    symbol = token.get("symbol") or "token"
+    config = pool.raw.get("pool_config") or {}
+    bin_step = config.get("bin_step", "-")
     return (
-        f"{index}. {pool.name}\n"
-        f"   Pool: {pool.address}\n"
-        f"   Market cap {symbol}: {money(token.get('market_cap'))}\n"
-        f"   TVL: {money(pool.raw.get('tvl'))}\n"
-        f"   Volume 15m: {money(pool.raw.get('_volume_15m'))} | 1h: {money(volume_1h)}\n"
-        f"   Volume 24h: {money(volume_24h)}\n"
-        f"   Fee APR 24h: {percent(pool.fee_apr)} | farm APR: {percent(pool.farm_apr)}\n"
-        f"   Estimasi total APR: {percent(pool.total_apr)}"
+        f"<b>{index}. {html_escape(str(pool.name))}</b>\n"
+        f"   🏊 Pool: <code>{html_escape(pool.address)}</code>\n"
+        f"   💧 TVL: {money(pool.raw.get('tvl'))}\n"
+        f"   📈 Volume 15m: {money(pool.raw.get('_volume_15m'))} | 1h: {money(volume_1h)}\n"
+        f"   📅 Volume 24h: {money(volume_24h)}\n"
+        f"   ⚙️ Fee: {fee_percent(config.get('base_fee_pct'))} | Bin step: {html_escape(str(bin_step))}\n"
+        f"   💸 Fee APR 24h: <b>{percent(pool.fee_apr)}</b>\n"
+        f"   🌾 Farm APR: {percent(pool.farm_apr)}\n"
+        f"   🚀 Estimasi total APR: <b>{percent(pool.total_apr)}</b>"
     )
 
 
@@ -266,26 +275,24 @@ def render_pools(mint: str, pools: list[PoolResult], partial: bool, max_items: i
         )
 
     token = pools[0].token_x if pools[0].token_x.get("address", "").lower() == mint.lower() else pools[0].token_y
-    symbol = token.get("symbol") or "?"
-    name = token.get("name") or "Unknown token"
+    symbol = html_escape(str(token.get("symbol") or "?"))
+    name = html_escape(str(token.get("name") or "Unknown token"))
     shown = pools[:max_items]
     lines = [
-        "Meteora DLMM APR",
-        f"Token: {name} ({symbol})",
-        f"Mint: {mint}",
-        f"Pool ditemukan: {len(pools)} | Ditampilkan: {len(shown)}",
+        "<b>🟠 METEORA DLMM</b>",
+        "━━━━━━━━━━━━━━━━━━",
+        "",
+        "🪙 <b>Token</b>",
+        f"{name} ({symbol})",
+        f"🏷 Market Cap: <b>{money(token.get('market_cap'))}</b>",
+        f"🔑 Mint: <code>{html_escape(mint)}</code>",
+        f"🔎 Pool ditemukan: {len(pools)} | Ditampilkan: {len(shown)}",
         "",
     ]
     lines.extend(pool_line(pool, i, mint) for i, pool in enumerate(shown, 1))
-    lines.extend(
-        [
-            "",
-            "Catatan: APR berasal dari data 24 jam Meteora dan dapat berubah cepat.",
-            "Estimasi total APR = fee APR + farm APR; bukan jaminan hasil dan belum memperhitungkan impermanent loss.",
-        ]
-    )
+    lines.append("")
     if partial:
-        lines.append("Peringatan: hasil pencarian dipotong oleh batas pagination bot.")
+        lines.append("⚠️ Hasil pencarian dipotong oleh batas pagination bot.")
 
     message = "\n".join(lines)
     return message[:MAX_TELEGRAM_MESSAGE]
@@ -301,8 +308,11 @@ class TelegramBotApi:
             raise ApiError(f"Telegram API error: {result}")
         return result.get("result")
 
-    def send(self, chat_id: int | str, text: str) -> None:
-        self.call("sendMessage", {"chat_id": chat_id, "text": text})
+    def send(self, chat_id: int | str, text: str, parse_mode: str | None = None) -> None:
+        payload: dict[str, Any] = {"chat_id": chat_id, "text": text}
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        self.call("sendMessage", payload)
 
 
 def valid_mint(value: str) -> bool:
@@ -324,6 +334,8 @@ def print_credit() -> None:
 
 
 def main() -> None:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     load_env_file()
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     if not token:
@@ -393,7 +405,7 @@ def main() -> None:
                     except ApiError:
                         pools, partial = meteora.find_pools_for_mint(mint)
                         meteora.enrich_with_15m_volume(pools[:max_items])
-                        api.send(chat_id, render_pools(mint, pools, partial, max_items))
+                        api.send(chat_id, render_pools(mint, pools, partial, max_items), parse_mode="HTML")
                 except ApiError as exc:
                     api.send(chat_id, f"Gagal mengambil data Meteora: {exc}")
                 except Exception:
