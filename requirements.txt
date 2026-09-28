@@ -1,0 +1,1 @@
+# Bot memakai Python standard library; file ini sengaja kosong dari dependency wajib.
