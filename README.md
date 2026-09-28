@@ -2,7 +2,7 @@
 
 link project: https://github.com/Noya-xen/APR
 
-Bot Telegram read-only untuk menerima mint token Solana lalu menampilkan pool Meteora DLMM yang ditemukan dalam format HTML Telegram dengan emoji, APR fee 24 jam, farm APR, TVL, market cap token, fee pool, bin step, serta volume 15 menit, 1 jam, dan 24 jam.
+Bot Telegram read-only untuk menerima mint token Solana atau contract EVM lalu menampilkan pool Meteora DLMM maupun Uniswap V3 dalam format HTML Telegram dengan emoji, APR fee 24 jam, farm APR, TVL, market cap token, fee pool, bin step, serta volume 15 menit, 1 jam, dan 24 jam.
 
 ## Fitur
 
@@ -15,15 +15,18 @@ Bot Telegram read-only untuk menerima mint token Solana lalu menampilkan pool Me
 - Menggunakan format HTML Telegram agar output lebih rapi.
 - Menyaring pool dengan TVL sangat kecil agar APR tidak menyesatkan.
 - Menyediakan alert berkala untuk pool tertentu dengan interval default 15 menit.
+- Mendukung pencarian contract EVM pada chain Uniswap yang tersedia melalui `/chains` atau `/evm <chain_id> <contract>`.
+- Mengambil daftar chain EVM dari endpoint resmi Uniswap dan data pool Uniswap V3 dari subgraph The Graph.
 - Tidak meminta private key dan tidak mengirim transaksi.
-- Mengambil data dari Meteora DLMM Data API resmi.
+- Mengambil data dari Meteora DLMM Data API dan endpoint/subgraph resmi yang dikonfigurasi.
 
 ## Menjalankan di Windows
 
 1. Install Python 3.10 atau lebih baru.
 2. Buat bot lewat `@BotFather` dan salin tokennya.
 3. Salin `.env.example` menjadi `.env`, lalu isi `TELEGRAM_BOT_TOKEN`.
-4. Jalankan:
+4. Jika ingin fitur EVM, isi `UNISWAP_API_KEY` dan `THE_GRAPH_API_KEY`. Tambahkan subgraph ID per chain pada `UNISWAP_SUBGRAPH_IDS` dengan format `chain_id:subgraph_id;chain_id:subgraph_id`.
+5. Jalankan:
 
 ```powershell
 python bot.py
@@ -34,6 +37,8 @@ python bot.py
 - `/start` atau `/help`
 - `/alerts` untuk melihat alert aktif.
 - `/stopalerts` untuk mematikan semua alert pada chat.
+- `/chains` untuk menampilkan chain Uniswap yang terdeteksi.
+- `/evm <chain_id> <contract>` untuk langsung mengecek token EVM, atau kirim contract `0x...` lalu pilih chain.
 - Kirim mint token, misalnya `So11111111111111111111111111111111111111112`
 - `/apr <mint>`
 
@@ -54,5 +59,7 @@ Sumber API: https://dlmm.datapi.meteora.ag/swagger-ui/
 ## Disclaimer
 
 Data APR bukan jaminan profit. Gunakan untuk riset dan lakukan verifikasi sendiri sebelum menyediakan likuiditas.
+
+Untuk Uniswap V3, fee APR dihitung dari estimasi fee swap 24 jam (`volume 24h × fee tier`) dibagi TVL, lalu dianualisasi 365 hari. Uniswap V3 tidak menyediakan farm APR umum pada subgraph, sehingga farm APR ditampilkan sebagai `N/A`. Volume 15 menit, 1 jam, dan 24 jam dihitung dari entitas swap The Graph; jika jumlah swap melewati batas query, bot memberi tanda bahwa volume mungkin terpotong. Satu API key The Graph tidak otomatis menyediakan subgraph ID untuk setiap chain, sehingga ID deployment chain perlu ditambahkan ke `.env`.
 
 > Built by: Noya-xen | [@xinomixo](https://x.com/XinoMixo)
